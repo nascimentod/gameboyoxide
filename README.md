@@ -1,2 +1,2 @@
 # gameboyoxide
-Playing around with Rust and GameBoy emulation
+Playing around with Rust and GameBoy emulation.
