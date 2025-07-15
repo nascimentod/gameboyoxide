@@ -1,6 +1,14 @@
 [package]
 name = "dmg-01"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+
+[lib]
+name = "dmg_01"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dmg-01"
+path = "src/main.rs"
 
 [dependencies]
