@@ -165,27 +165,31 @@ fn test_stack_operations() {
 #[test]
 fn test_fetch_decode_cycle() {
     let mut cpu = CPU::new();
-    cpu.bus.memory[0x0100] = 0x00;
-    cpu.bus.memory[0x0101] = 0x76;
-    cpu.bus.memory[0x0102] = 0x3E;
-    cpu.bus.memory[0x0103] = 0x42;
+    cpu.pc = 0xC000; // Set PC to RAM address space
+    cpu.bus.memory[0xC000] = 0x00; // NOP
+    cpu.bus.memory[0xC001] = 0x76; // HALT
+    cpu.bus.memory[0xC002] = 0x3E; // LD A, d8
+    cpu.bus.memory[0xC003] = 0x42; // d8 value
 
     let instruction = cpu.fetch_decode();
-    assert_eq!(cpu.pc, 0x0101);
+    assert_eq!(cpu.pc, 0xC001);
     match instruction {
         Instruction::NOP => {}
-        _ => panic!("Expected NOP instruction"),
+        _ => {
+            println!("Got instruction: {:?}", instruction);
+            panic!("Expected NOP instruction")
+        },
     }
 
     let instruction = cpu.fetch_decode();
-    assert_eq!(cpu.pc, 0x0102);
+    assert_eq!(cpu.pc, 0xC002);
     match instruction {
         Instruction::HALT => {}
         _ => panic!("Expected HALT instruction"),
     }
 
     let instruction = cpu.fetch_decode();
-    assert_eq!(cpu.pc, 0x0103);
+    assert_eq!(cpu.pc, 0xC003); // fetch_decode only advances PC by 1 for opcode
     match instruction {
         Instruction::LD(LoadTarget::AFromD8) => {}
         _ => panic!("Expected LD A, d8 instruction"),
