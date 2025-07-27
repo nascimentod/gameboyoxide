@@ -130,12 +130,47 @@ fn main() {
                     paused = !paused;
                     println!("Emulation {}", if paused { "paused" } else { "resumed" });
                 }
+                WindowEvent::KeyboardInput { 
+                    input: winit::event::KeyboardInput {
+                        virtual_keycode: Some(VirtualKeyCode::Return),
+                        state: winit::event::ElementState::Pressed,
+                        ..
+                    },
+                    .. 
+                } => {
+                    // Simulate pressing START button for Pokemon Red
+                    println!("🎮 Simulating START button press for Pokemon Red");
+                    gameboy.press_button(crate::joypad::JoypadButton::Start);
+                    
+                    // Release button after a short delay (simulate in next frame)
+                    // This is a simple test to see if Pokemon Red responds to input
+                }
                 _ => {}
             },
             Event::MainEventsCleared => {
                 let now = Instant::now();
                 if now.duration_since(last_frame_time) >= frame_duration {
                     if !paused {
+                        // AUTO-TEST: Send START button after some time for Pokemon Red testing
+                        static mut FRAME_COUNTER: u32 = 0;
+                        unsafe {
+                            FRAME_COUNTER += 1;
+                            if FRAME_COUNTER == 300 { // After ~5 seconds (60fps * 5)
+                                println!("🎮 AUTO-TEST: Sending START button to Pokemon Red");
+                                gameboy.press_button(crate::joypad::JoypadButton::Start);
+                            }
+                            if FRAME_COUNTER == 310 { // Release after a few frames
+                                gameboy.release_button(crate::joypad::JoypadButton::Start);
+                            }
+                            if FRAME_COUNTER == 400 { // Try A button 
+                                println!("🎮 AUTO-TEST: Sending A button to Pokemon Red");
+                                gameboy.press_button(crate::joypad::JoypadButton::A);
+                            }
+                            if FRAME_COUNTER == 410 {
+                                gameboy.release_button(crate::joypad::JoypadButton::A);
+                            }
+                        }
+                        
                         // Run emulation for approximately one frame worth of cycles
                         // Game Boy runs at ~4.194 MHz, 60 FPS = ~69905 cycles per frame
                         for _ in 0..69905 {
@@ -191,9 +226,12 @@ fn update_display(gameboy: &GameBoy, frame: &mut [u8]) {
                 println!("Framebuffer has {} non-white pixels!", non_white_count);
                 
                 // Sample some pixel values
-                for (i, &pixel) in framebuffer.iter().enumerate().take(5) {
-                    if pixel != Color::White {
-                        println!("Pixel {}: {:?}", i, pixel);
+                let mut sample_count = 0;
+                for (i, &pixel) in framebuffer.iter().enumerate() {
+                    if pixel != Color::White && sample_count < 10 {
+                        let rgb = pixel.to_rgb();
+                        println!("Pixel {}: {:?} -> RGB({},{},{})", i, pixel, rgb.0, rgb.1, rgb.2);
+                        sample_count += 1;
                     }
                 }
                 

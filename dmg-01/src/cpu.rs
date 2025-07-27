@@ -48,6 +48,63 @@ impl CPU {
     }
 
     pub fn step(&mut self) {
+        // Debug: Track Pokemon Red execution progress
+        static mut EXECUTION_DEBUG_COUNT: u32 = 0;
+        unsafe {
+            EXECUTION_DEBUG_COUNT += 1;
+            if EXECUTION_DEBUG_COUNT % 50000 == 0 { // Every 50k instructions
+                println!("🔄 Pokemon Red executing: PC=0x{:04X}, SP=0x{:04X}, cycles={}", 
+                    self.pc, self.sp, EXECUTION_DEBUG_COUNT);
+                
+                // Check if PC is stuck in a loop  
+                static mut LAST_PC: u16 = 0;
+                static mut STUCK_COUNT: u32 = 0;
+                if LAST_PC == self.pc {
+                    STUCK_COUNT += 1;
+                    if STUCK_COUNT == 1 {
+                        println!("⚠️ CPU might be stuck at PC=0x{:04X}", self.pc);
+                        // Show the instruction that's causing the loop
+                        let opcode = self.bus.read_byte(self.pc);
+                        println!("  Instruction at PC=0x{:04X}: 0x{:02X}", self.pc, opcode);
+                        
+                        // Show interrupt state
+                        println!("  IME={}, IE=0x{:02X}, IF=0x{:02X}, halted={}", 
+                            self.ime, self.ie_register, self.if_register, self.halted);
+                        
+                        // Show if VBLANK interrupt is enabled and pending
+                        let vblank_enabled = (self.ie_register & (1 << VBLANK_BIT)) != 0;
+                        let vblank_pending = (self.if_register & (1 << VBLANK_BIT)) != 0;
+                        println!("  VBLANK: enabled={}, pending={}", vblank_enabled, vblank_pending);
+                        
+                        // DEBUG: Show memory content around PC to understand the issue
+                        println!("  Memory around PC:");
+                        for i in 0..8 {
+                            let addr = self.pc.wrapping_add(i);
+                            let byte = self.bus.read_byte(addr);
+                            println!("    0x{:04X}: 0x{:02X}", addr, byte);
+                        }
+                        
+                        // Check if we're reading from boot ROM or cartridge
+                        println!("  Boot ROM enabled: {}", self.bus.boot_rom_enabled);
+                        if self.pc < 0x0100 && !self.bus.boot_rom_enabled {
+                            println!("  WARNING: Reading from cartridge ROM in boot ROM address range!");
+                        }
+                        
+                        // BOOT ROM VBLANK DEBUG: If stuck at 0x0068, check LY register
+                        if self.pc == 0x0068 && self.bus.boot_rom_enabled {
+                            let ly_value = self.bus.read_byte(0xFF44);
+                            println!("  🎮 BOOT ROM VBLANK WAIT: LY={} (waiting for LY=144 to exit loop)", ly_value);
+                            println!("  🎮 PPU State: ly={}, mode={:?}, clock={}", 
+                                self.bus.ppu.ly, self.bus.ppu.stat.mode, self.bus.ppu.mode_clock);
+                        }
+                    }
+                } else {
+                    STUCK_COUNT = 0;
+                }
+                LAST_PC = self.pc;
+            }
+        }
+        
         // Handle EI delay (EI enables interrupts on the next instruction)
         if self.ei_delay {
             self.ime = true;
@@ -1686,8 +1743,17 @@ impl CPU {
         self.bus.ie_register = self.ie_register;
         self.bus.if_register = self.if_register;
         
-        // Step PPU and Timer (4 cycles per CPU instruction is typical)
-        let (vblank_interrupt, stat_interrupt, timer_interrupt, joypad_interrupt) = self.bus.step(4);
+        // BOOT ROM TIMING FIX: Use more accurate cycle timing during boot ROM VBLANK wait
+        // The boot ROM gets stuck because it executes too fast relative to PPU timing
+        let cycles = if self.bus.boot_rom_enabled && (self.pc >= 0x0064 && self.pc <= 0x0069) {
+            // Boot ROM VBLANK wait loop - use more cycles to slow down CPU relative to PPU
+            // This ensures LY=144 window lasts long enough for detection
+            8  // Increase from 4 to 8 cycles for proper timing
+        } else {
+            4  // Normal timing for other code
+        };
+        
+        let (vblank_interrupt, stat_interrupt, timer_interrupt, joypad_interrupt) = self.bus.step(cycles);
         
         // Update interrupt flags based on peripheral events
         if vblank_interrupt {

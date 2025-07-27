@@ -215,59 +215,71 @@ impl MemoryBus {
                 let vram_addr = (address - 0x8000) as usize;
                 self.ppu.vram[vram_addr] = value;
                 
-                // Debug: Watch for Pokemon Red tile data loading
-                if vram_addr >= 0x1000 && value != 0 && !self.boot_rom_enabled {
+                // Debug: Watch for Pokemon Red tile graphics vs tile map loading with focus on tile 0x7F
+                if !self.boot_rom_enabled {
                     static mut POKEMON_TILE_COUNT: u32 = 0;
+                    static mut POKEMON_MAP_COUNT: u32 = 0;
+                    static mut TILE_DUMP_DONE: bool = false;
                     unsafe {
-                        POKEMON_TILE_COUNT += 1;
-                        if POKEMON_TILE_COUNT <= 20 {
-                            println!("Pokemon Red loading tile data! VRAM[0x{:04X}] = 0x{:02X}", vram_addr, value);
+                        if vram_addr < 0x1800 && value != 0 { // Tile graphics area (0x8000-0x97FF)
+                            POKEMON_TILE_COUNT += 1;
+                            if POKEMON_TILE_COUNT <= 15 {
+                                println!("🎮 Pokemon Red loading TILE GRAPHICS! VRAM[0x{:04X}] = 0x{:02X} (GB_addr=0x{:04X})", vram_addr, value, address);
+                                
+                                // Check if this data could be for tile 0x7F
+                                // In unsigned mode: tile 0x7F = VRAM 0x7F0-0x7FF
+                                // In signed mode: tile 0x7F = VRAM 0x17F0-0x17FF
+                                if (vram_addr >= 0x7F0 && vram_addr <= 0x7FF) {
+                                    println!("🎯 GRAPHICS FOR TILE 0x7F (unsigned mode): VRAM[0x{:04X}] = 0x{:02X}", vram_addr, value);
+                                }
+                                if (vram_addr >= 0x17F0 && vram_addr <= 0x17FF) {
+                                    println!("🎯 GRAPHICS FOR TILE 0x7F (signed mode): VRAM[0x{:04X}] = 0x{:02X}", vram_addr, value);
+                                }
+                            }
+                        } else if vram_addr >= 0x1800 { // Tile map area (0x9800-0x9FFF) - include zero writes too!
+                            POKEMON_MAP_COUNT += 1;
+                            if POKEMON_MAP_COUNT <= 25 {
+                                if value == 0x00 {
+                                    println!("❌ Pokemon Red CLEARING TILE MAP! VRAM[0x{:04X}] = 0x00 (GB_addr=0x{:04X})", vram_addr, address);
+                                } else if value == 0x7F {
+                                    println!("✅ Pokemon Red loading TILE MAP! VRAM[0x{:04X}] = 0x7F (GB_addr=0x{:04X})", vram_addr, address);
+                                } else {
+                                    println!("🗺️ Pokemon Red TILE MAP! VRAM[0x{:04X}] = 0x{:02X} (GB_addr=0x{:04X})", vram_addr, value, address);
+                                }
+                            }
+                            
+                            // After several tile map entries, dump what's actually in tiles 0x7F and 0x00
+                            if POKEMON_MAP_COUNT == 10 && !TILE_DUMP_DONE {
+                                TILE_DUMP_DONE = true;
+                                println!("🔥 TILE DUMP AFTER POKEMON RED LOADS DATA:");
+                                
+                                // Dump tile 0x7F in signed mode (0x17F0)
+                                print!("Tile 0x7F (signed, VRAM 0x17F0): ");
+                                for i in 0..16 {
+                                    print!("{:02X} ", self.ppu.vram[0x17F0 + i]);
+                                }
+                                println!();
+                                
+                                // Dump tile 0x00 for comparison
+                                print!("Tile 0x00 (VRAM 0x0000): ");
+                                for i in 0..16 {
+                                    print!("{:02X} ", self.ppu.vram[0x0000 + i]);
+                                }
+                                println!();
+                                
+                                // Also check tile 0x7F in unsigned mode (0x7F0) 
+                                print!("Tile 0x7F (unsigned, VRAM 0x07F0): ");
+                                for i in 0..16 {
+                                    print!("{:02X} ", self.ppu.vram[0x07F0 + i]);
+                                }
+                                println!();
+                            }
                         }
                     }
                 }
                 
-                // Add test tile data for multiple common tile IDs to test the renderer
-                static mut TEST_TILE_LOADED: bool = false;
-                unsafe {
-                    if !TEST_TILE_LOADED && !self.boot_rom_enabled && vram_addr >= 0x1000 {
-                        TEST_TILE_LOADED = true;
-                        println!("Loading test tile graphics for multiple tiles");
-                        
-                        // Create a simple test pattern: diagonal stripes (will use this for all test tiles)
-                        let test_tile: [u8; 16] = [
-                            0xFF, 0xFF,  // Row 0: solid black line
-                            0x81, 0x81,  // Row 1: bit pattern 10000001 (with color data)
-                            0x42, 0x42,  // Row 2: bit pattern 01000010  
-                            0x24, 0x24,  // Row 3: bit pattern 00100100
-                            0x18, 0x18,  // Row 4: bit pattern 00011000
-                            0x24, 0x24,  // Row 5: bit pattern 00100100
-                            0x42, 0x42,  // Row 6: bit pattern 01000010
-                            0xFF, 0xFF,  // Row 7: solid black line
-                        ];
-                        
-                        // Load test graphics for UNSIGNED mode (Pokemon Red uses unsigned addressing!)
-                        // In unsigned mode, tile data starts at VRAM[0x0000] = address 0x8000
-                        // Tile 0x00 is at 0x0000, Tile 0x01 is at 0x0010, etc.
-                        
-                        // Tile 0x00 (unsigned mode) at VRAM[0x0000] = 0x8000
-                        for (i, &byte) in test_tile.iter().enumerate() {
-                            self.ppu.vram[0x0000 + i] = byte;
-                        }
-                        
-                        // Tile 0x01 (unsigned mode) at VRAM[0x0010] = 0x8010
-                        for (i, &byte) in test_tile.iter().enumerate() {
-                            self.ppu.vram[0x0010 + i] = byte;
-                        }
-                        
-                        // Tile 0x02 (unsigned mode) at VRAM[0x0020] = 0x8020
-                        for (i, &byte) in test_tile.iter().enumerate() {
-                            self.ppu.vram[0x0020 + i] = byte;
-                        }
-                        
-                        println!("Test tiles loaded for IDs: 0x00, 0x01, 0x7F, 0x80, 0xFF");
-                        println!("Each tile creates a visible striped pattern with solid black borders");
-                    }
-                }
+                // Pokemon Red should load its own graphics data - let's not interfere with test tiles
+                // Instead, let's see what tiles Pokemon Red is actually accessing
             }
             0xA000..=0xBFFF => {
                 if let Some(cartridge) = &mut self.cartridge {
@@ -300,7 +312,8 @@ impl MemoryBus {
                 // Boot ROM disable register
                 if value != 0 && self.boot_rom_enabled {
                     self.boot_rom_enabled = false;
-                    println!("Boot ROM disabled! Value written: 0x{:02X}", value);
+                    println!("🚀 Boot ROM disabled! Value written: 0x{:02X} - cartridge ROM now active at 0x0000-0x00FF", value);
+                    println!("  Boot ROM transition: PC should be around 0x0100 (cartridge entry point)");
                 } else if value != 0 {
                     println!("Warning: Attempt to write to boot ROM disable register when already disabled. Value: 0x{:02X}", value);
                 }
@@ -309,7 +322,15 @@ impl MemoryBus {
             0xFF80..=0xFFFE => self.memory[address as usize] = value,
             0xFFFF => {
                 // Interrupt Enable register (IE)
+                let old_ie = self.ie_register;
                 self.ie_register = value;
+                if old_ie != value {
+                    println!("🔧 IE Register changed: 0x{:02X} -> 0x{:02X}", old_ie, value);
+                    if value != 0 {
+                        println!("  Interrupts enabled: VBLANK={} STAT={} TIMER={} SERIAL={} JOYPAD={}", 
+                            (value & 1) != 0, (value & 2) != 0, (value & 4) != 0, (value & 8) != 0, (value & 16) != 0);
+                    }
+                }
             }
         }
     }
