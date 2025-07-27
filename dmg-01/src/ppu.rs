@@ -348,12 +348,30 @@ impl PPU {
         static mut DEBUG_COUNT: u32 = 0;
         unsafe {
             DEBUG_COUNT += 1;
-            if DEBUG_COUNT == 1000 { // Only debug once after some rendering
+            if DEBUG_COUNT == 2000 { // Debug after Pokemon Red starts
                 let non_zero_vram = self.vram.iter().filter(|&&b| b != 0).count();
-                println!("VRAM has {} non-zero bytes", non_zero_vram);
+                println!("Pokemon Red VRAM: {} non-zero bytes", non_zero_vram);
                 if non_zero_vram > 0 {
-                    println!("First 32 VRAM bytes: {:02X?}", &self.vram[0..32]);
+                    println!("VRAM 0x1000-0x1020 (signed tile area): {:02X?}", &self.vram[0x1000..0x1020]);
                 }
+            }
+        }
+
+        // Debug first pixel of each scanline to understand what's happening
+        static mut SCANLINE_DEBUG_COUNT: u32 = 0;
+        unsafe {
+            SCANLINE_DEBUG_COUNT += 1;
+            if SCANLINE_DEBUG_COUNT <= 5 { // Debug first 5 scanlines only
+                let scroll_x = self.scx;
+                let tile_col = (scroll_x / 8) as usize;
+                let tile_x = (scroll_x % 8) as usize;
+                let tile_map_base = if self.lcdc.bg_tile_map { 0x1C00 } else { 0x1800 };
+                let tile_map_addr = tile_map_base + (tile_row % 32) * 32 + (tile_col % 32);
+                let tile_id = self.vram[tile_map_addr];
+                
+                println!("Scanline {}: scroll=({},{}), tile_row={}, tile_col={}, tile_map_addr=0x{:04X}, tile_id=0x{:02X}", 
+                    scanline, self.scx, self.scy, tile_row, tile_col, tile_map_addr, tile_id);
+                println!("  LCDC: bg_tile_map={}, bg_window_tile_data={}", self.lcdc.bg_tile_map, self.lcdc.bg_window_tile_data);
             }
         }
 
@@ -371,13 +389,20 @@ impl PPU {
             let color = self.get_tile_pixel(tile_id, tile_x, tile_y);
             let final_color = self.bgp.get_color(color);
 
+            // Debug: Check first few pixels to see what colors are being set
+            static mut PIXEL_DEBUG_COUNT: u32 = 0;
+            unsafe {
+                PIXEL_DEBUG_COUNT += 1;
+                if PIXEL_DEBUG_COUNT <= 5 {
+                    println!("Pixel #{}: raw_color={}, final_color={:?}", PIXEL_DEBUG_COUNT, color, final_color);
+                }
+            }
+
             // Set pixel in framebuffer
             self.framebuffer[scanline * LCD_WIDTH + pixel] = final_color;
             
             // Set background priority
             self.bg_priority[pixel] = color != 0;
-            
-            // No debug output needed for tile rendering
         }
     }
 
@@ -517,9 +542,14 @@ impl PPU {
         };
 
         let tile_addr = if self.lcdc.bg_window_tile_data {
+            // Unsigned mode: tiles 0-255 at 0x8000-0x8FF0
             tile_data_base + (tile_id as usize) * 16
         } else {
-            tile_data_base + ((tile_id as i8 as i16) * 16) as usize
+            // Signed mode: tiles -128 to 127 at 0x8800 + (signed_id * 16)
+            // Base 0x8800 corresponds to tile index 0 in signed mode
+            let signed_tile_id = tile_id as i8 as i16;
+            let signed_addr = tile_data_base as i16 + (signed_tile_id * 16);
+            signed_addr as usize
         };
 
         let byte_offset = y * 2;
@@ -532,7 +562,25 @@ impl PPU {
 
         let color = (high_bit << 1) | low_bit;
         
-        // No debug output needed for tile pixels
+        // Debug tile data access for Pokemon Red
+        static mut TILE_DEBUG_COUNT: u32 = 0;
+        unsafe {
+            TILE_DEBUG_COUNT += 1;
+            if TILE_DEBUG_COUNT <= 10 { // Debug first 10 tile accesses
+                let signed_id = tile_id as i8;
+                println!("Tile Debug #{}: tile_id=0x{:02X} (signed={}), mode={}, base=0x{:04X}, addr=0x{:04X}, low=0x{:02X}, high=0x{:02X}, color={}", 
+                    TILE_DEBUG_COUNT, tile_id, signed_id, self.lcdc.bg_window_tile_data, tile_data_base, tile_addr, low_byte, high_byte, color);
+                if color != 0 {
+                    println!("*** NON-ZERO COLOR FOUND! *** Checking VRAM around 0x{:04X}", tile_addr);
+                    for i in 0..16 {
+                        print!("{:02X} ", self.vram[tile_addr + i]);
+                    }
+                    println!();
+                }
+                // Show what tile IDs Pokemon Red is actually using
+                println!("Pokemon Red using tile ID: 0x{:02X} at screen position - signed addressing = {}", tile_id, !self.lcdc.bg_window_tile_data);
+            }
+        }
         
         color
     }
@@ -586,7 +634,8 @@ impl PPU {
             BGP_ADDR => {
                 self.bgp = Palette::from_byte(value);
                 if value != 0 {
-                    println!("BGP set to: 0x{:02X}", value);
+                    println!("BGP set to: 0x{:02X} - Color mapping: 0={:?}, 1={:?}, 2={:?}, 3={:?}", 
+                        value, self.bgp.colors[0], self.bgp.colors[1], self.bgp.colors[2], self.bgp.colors[3]);
                 }
             },
             OBP0_ADDR => self.obp0 = Palette::from_byte(value),

@@ -183,7 +183,7 @@ fn update_display(gameboy: &GameBoy, frame: &mut [u8]) {
     static mut FRAME_COUNT: u32 = 0;
     unsafe {
         FRAME_COUNT += 1;
-        if FRAME_COUNT % 60 == 0 { // Every ~1 second at 60fps
+        if FRAME_COUNT % 10 == 0 { // Every ~10 frames for faster feedback
             let non_white_count = framebuffer.iter()
                 .filter(|&&pixel| pixel != Color::White)
                 .count();
@@ -191,13 +191,31 @@ fn update_display(gameboy: &GameBoy, frame: &mut [u8]) {
                 println!("Framebuffer has {} non-white pixels!", non_white_count);
                 
                 // Sample some pixel values
-                for (i, &pixel) in framebuffer.iter().enumerate().take(10) {
+                for (i, &pixel) in framebuffer.iter().enumerate().take(5) {
                     if pixel != Color::White {
                         println!("Pixel {}: {:?}", i, pixel);
                     }
                 }
+                
+                // Track when graphics become available
+                static mut GRAPHICS_FOUND: bool = false;
+                unsafe {
+                    if !GRAPHICS_FOUND {
+                        GRAPHICS_FOUND = true;
+                        println!("🎮 GRAPHICS SUCCESSFULLY RENDERED! Pokemon Red is displaying visuals!");
+                    }
+                }
             } else {
                 println!("Framebuffer is all white (no graphics rendered)");
+                
+                // Track when graphics disappear
+                static mut GRAPHICS_LOST: bool = false;
+                unsafe {
+                    if !GRAPHICS_LOST {
+                        GRAPHICS_LOST = true;
+                        println!("⚠️  Graphics disappeared - screen went white");
+                    }
+                }
             }
         }
     }

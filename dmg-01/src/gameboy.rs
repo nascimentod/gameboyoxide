@@ -12,9 +12,9 @@ impl GameBoy {
 
     pub fn load_cartridge(&mut self, rom_data: Vec<u8>) {
         self.cpu.bus.load_cartridge(rom_data);
-        // For testing purposes, set PC to cartridge entry point and disable boot ROM
-        self.cpu.pc = 0x0100;
-        self.cpu.bus.boot_rom_enabled = false;
+        // Let the boot ROM run naturally - it will set up the Nintendo logo and initialize the system
+        // The boot ROM will disable itself when complete (writes to 0xFF50)
+        println!("Boot ROM enabled - will run Nintendo logo sequence");
     }
 
     pub fn run(&mut self) {

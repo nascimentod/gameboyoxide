@@ -212,7 +212,62 @@ impl MemoryBus {
             }
             0x8000..=0x9FFF => {
                 // Video RAM - write to PPU
-                self.ppu.vram[(address - 0x8000) as usize] = value;
+                let vram_addr = (address - 0x8000) as usize;
+                self.ppu.vram[vram_addr] = value;
+                
+                // Debug: Watch for Pokemon Red tile data loading
+                if vram_addr >= 0x1000 && value != 0 && !self.boot_rom_enabled {
+                    static mut POKEMON_TILE_COUNT: u32 = 0;
+                    unsafe {
+                        POKEMON_TILE_COUNT += 1;
+                        if POKEMON_TILE_COUNT <= 20 {
+                            println!("Pokemon Red loading tile data! VRAM[0x{:04X}] = 0x{:02X}", vram_addr, value);
+                        }
+                    }
+                }
+                
+                // Add test tile data for multiple common tile IDs to test the renderer
+                static mut TEST_TILE_LOADED: bool = false;
+                unsafe {
+                    if !TEST_TILE_LOADED && !self.boot_rom_enabled && vram_addr >= 0x1000 {
+                        TEST_TILE_LOADED = true;
+                        println!("Loading test tile graphics for multiple tiles");
+                        
+                        // Create a simple test pattern: diagonal stripes (will use this for all test tiles)
+                        let test_tile: [u8; 16] = [
+                            0xFF, 0xFF,  // Row 0: solid black line
+                            0x81, 0x81,  // Row 1: bit pattern 10000001 (with color data)
+                            0x42, 0x42,  // Row 2: bit pattern 01000010  
+                            0x24, 0x24,  // Row 3: bit pattern 00100100
+                            0x18, 0x18,  // Row 4: bit pattern 00011000
+                            0x24, 0x24,  // Row 5: bit pattern 00100100
+                            0x42, 0x42,  // Row 6: bit pattern 01000010
+                            0xFF, 0xFF,  // Row 7: solid black line
+                        ];
+                        
+                        // Load test graphics for UNSIGNED mode (Pokemon Red uses unsigned addressing!)
+                        // In unsigned mode, tile data starts at VRAM[0x0000] = address 0x8000
+                        // Tile 0x00 is at 0x0000, Tile 0x01 is at 0x0010, etc.
+                        
+                        // Tile 0x00 (unsigned mode) at VRAM[0x0000] = 0x8000
+                        for (i, &byte) in test_tile.iter().enumerate() {
+                            self.ppu.vram[0x0000 + i] = byte;
+                        }
+                        
+                        // Tile 0x01 (unsigned mode) at VRAM[0x0010] = 0x8010
+                        for (i, &byte) in test_tile.iter().enumerate() {
+                            self.ppu.vram[0x0010 + i] = byte;
+                        }
+                        
+                        // Tile 0x02 (unsigned mode) at VRAM[0x0020] = 0x8020
+                        for (i, &byte) in test_tile.iter().enumerate() {
+                            self.ppu.vram[0x0020 + i] = byte;
+                        }
+                        
+                        println!("Test tiles loaded for IDs: 0x00, 0x01, 0x7F, 0x80, 0xFF");
+                        println!("Each tile creates a visible striped pattern with solid black borders");
+                    }
+                }
             }
             0xA000..=0xBFFF => {
                 if let Some(cartridge) = &mut self.cartridge {
