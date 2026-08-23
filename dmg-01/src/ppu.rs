@@ -213,25 +213,8 @@ impl PPU {
     }
 
     pub fn step(&mut self, cycles: u32) {
-        // Debug LCDC state periodically to understand why no rendering happens
-        static mut LCDC_DEBUG_COUNT: u32 = 0;
-        static mut TOTAL_PPU_CYCLES: u32 = 0;
-        unsafe {
-            LCDC_DEBUG_COUNT += 1;
-            TOTAL_PPU_CYCLES += cycles;
-            if LCDC_DEBUG_COUNT % 50000 == 0 { // Every 50k cycles
-                println!("🖥️ PPU State: lcd_enabled={}, bg_enabled={}, mode={:?}, ly={}, mode_clock={}, total_cycles={}", 
-                    self.lcdc.lcd_enable, self.lcdc.bg_window_enable, self.stat.mode, self.ly, self.mode_clock, TOTAL_PPU_CYCLES);
-            }
-        }
-        
         if !self.lcdc.lcd_enable {
-            // POKEMON RED COMPATIBILITY: Even when LCD is disabled, continue timing for VBLANK interrupts
-            // Pokemon Red disables LCD but expects VBLANK interrupts to continue for proper timing
-            // This matches real Game Boy hardware where the PPU's timing continues even with display off
             self.mode_clock += cycles;
-            
-            // Generate VBLANK interrupt at proper intervals (every ~70224 cycles)
             if self.mode_clock >= 70224 {
                 self.mode_clock = 0;
                 self.vblank_interrupt = true;
@@ -262,23 +245,11 @@ impl PPU {
             PPUMode::HBlank => {
                 if self.mode_clock >= 204 {
                     self.mode_clock = 0;
-                    let old_ly = self.ly;
                     self.ly += 1;
                     
-                    // BOOT ROM DEBUG: Track LY progression during boot ROM execution
-                    static mut LY_DEBUG_COUNT: u32 = 0;
-                    unsafe {
-                        LY_DEBUG_COUNT += 1;
-                        if old_ly > 90 {
-                            println!("🎮 PPU: LY advanced from {} to {} (approaching VBLANK at 144)", old_ly, self.ly);
-                        }
-                    }
-                    
                     if self.ly == 144 {
-                        // Enter V-blank
                         self.stat.mode = PPUMode::VBlank;
                         self.vblank_interrupt = true;
-                        println!("🎮 PPU: ENTERED VBLANK! LY=144 - boot ROM should exit wait loop now");
                         
                         if self.stat.vblank_interrupt {
                             self.stat_interrupt = true;
@@ -325,32 +296,11 @@ impl PPU {
     }
 
     fn render_scanline(&mut self) {
-        // Debug: Track if scanline rendering is called at all
-        static mut RENDER_DEBUG_COUNT: u32 = 0;
-        unsafe {
-            RENDER_DEBUG_COUNT += 1;
-            if RENDER_DEBUG_COUNT <= 5 {
-                println!("🎨 render_scanline #{}: ly={}, lcd_enabled={}, bg_enabled={}", 
-                    RENDER_DEBUG_COUNT, self.ly, self.lcdc.lcd_enable, self.lcdc.bg_window_enable);
-            }
-        }
-        
         if self.ly >= LCD_HEIGHT as u8 {
             return;
         }
 
         let scanline = self.ly as usize;
-        
-        // Debug: Check LCDC settings and rendering status
-        static mut LCDC_DEBUG_COUNT: u32 = 0;
-        unsafe {
-            LCDC_DEBUG_COUNT += 1;
-            if LCDC_DEBUG_COUNT == 1000 { // Debug after some scanlines
-                println!("LCDC Debug: lcd_enable={}, bg_window_enable={}, sprite_enable={}, window_enable={}", 
-                    self.lcdc.lcd_enable, self.lcdc.bg_window_enable, self.lcdc.sprite_enable, self.lcdc.window_enable);
-                println!("PPU State: LY={}, SCX={}, SCY={}", self.ly, self.scx, self.scy);
-            }
-        }
         
         // Clear background priority for this scanline
         for i in 0..LCD_WIDTH {
@@ -360,15 +310,6 @@ impl PPU {
         // Render background
         if self.lcdc.bg_window_enable {
             self.render_background(scanline);
-        } else {
-            // Debug: Background disabled
-            static mut BG_DISABLED_COUNT: u32 = 0;
-            unsafe {
-                BG_DISABLED_COUNT += 1;
-                if BG_DISABLED_COUNT == 1 {
-                    println!("Background rendering is DISABLED (bg_window_enable=false)");
-                }
-            }
         }
 
         // Render window
@@ -387,60 +328,6 @@ impl PPU {
         let tile_row = (scroll_y / 8) as usize;
         let tile_y = (scroll_y % 8) as usize;
 
-        // Debug: Check tile map contents - why are we reading 0x00 instead of 0x7F?
-        static mut DEBUG_COUNT: u32 = 0;
-        unsafe {
-            DEBUG_COUNT += 1;
-            if DEBUG_COUNT <= 3 { // Debug first 3 scanlines only
-                let tile_map_base = if self.lcdc.bg_tile_map { 0x1C00 } else { 0x1800 };
-                println!("🔍 Scanline {}: Tile map base=0x{:04X}, bg_tile_map={}", scanline, tile_map_base, self.lcdc.bg_tile_map);
-                
-                // Show first 16 tiles in the map
-                print!("First 16 tiles: ");
-                for i in 0..16 {
-                    print!("0x{:02X} ", self.vram[tile_map_base + i]);
-                }
-                println!();
-                
-                // Check if 0x7F appears anywhere in the tile map
-                let tile_7f_count = self.vram[tile_map_base..tile_map_base + 32*18].iter().filter(|&&b| b == 0x7F).count();
-                println!("Count of 0x7F tiles in first 18 rows: {}", tile_7f_count);
-            }
-        }
-
-        // Debug what Pokemon Red is trying to render
-        static mut SCANLINE_DEBUG_COUNT: u32 = 0;
-        unsafe {
-            SCANLINE_DEBUG_COUNT += 1;
-            if SCANLINE_DEBUG_COUNT % 1000 == 1 { // Debug more frequently
-                let scroll_x = self.scx;
-                let tile_col = (scroll_x / 8) as usize;
-                let tile_map_base = if self.lcdc.bg_tile_map { 0x1C00 } else { 0x1800 };
-                let tile_map_addr = tile_map_base + (tile_row % 32) * 32 + (tile_col % 32);
-                let tile_id = self.vram[tile_map_addr];
-                
-                println!("Scanline {}: tile_id=0x{:02X}, LCDC_signed_mode={}, tile_map_addr=0x{:04X}", 
-                    scanline, tile_id, !self.lcdc.bg_window_tile_data, tile_map_addr);
-                
-                // Check if this tile has any graphics data
-                let tile_addr = if self.lcdc.bg_window_tile_data {
-                    (tile_id as usize) * 16
-                } else {
-                    let signed_tile_id = tile_id as i8 as i16;
-                    let signed_addr = 0x1000i16 + (signed_tile_id * 16);
-                    signed_addr as usize
-                };
-                
-                if tile_addr < VRAM_SIZE - 16 {
-                    let tile_has_data = self.vram[tile_addr..tile_addr + 16].iter().any(|&b| b != 0);
-                    println!("  Tile 0x{:02X} at VRAM[0x{:04X}] has_data={}", tile_id, tile_addr, tile_has_data);
-                    if !tile_has_data && tile_id == 0x7F {
-                        println!("  *** Pokemon Red wants tile 0x7F but it has no graphics data! ***");
-                    }
-                }
-            }
-        }
-
         for pixel in 0..LCD_WIDTH {
             let scroll_x = self.scx.wrapping_add(pixel as u8);
             let tile_col = (scroll_x / 8) as usize;
@@ -454,15 +341,6 @@ impl PPU {
             // Get tile data
             let color = self.get_tile_pixel(tile_id, tile_x, tile_y);
             let final_color = self.bgp.get_color(color);
-
-            // Debug: Check first few pixels to see what colors are being set
-            static mut PIXEL_DEBUG_COUNT: u32 = 0;
-            unsafe {
-                PIXEL_DEBUG_COUNT += 1;
-                if PIXEL_DEBUG_COUNT <= 20 { // Increase debug count to see more pixels
-                    println!("Pixel #{}: raw_color={}, final_color={:?}, palette={:?}", PIXEL_DEBUG_COUNT, color, final_color, self.bgp.colors);
-                }
-            }
 
             // Set pixel in framebuffer
             self.framebuffer[scanline * LCD_WIDTH + pixel] = final_color;
@@ -615,14 +493,6 @@ impl PPU {
 
         // Bounds checking for VRAM access
         if tile_addr + 15 >= VRAM_SIZE {
-            static mut BOUNDS_ERROR_COUNT: u32 = 0;
-            unsafe {
-                BOUNDS_ERROR_COUNT += 1;
-                if BOUNDS_ERROR_COUNT <= 5 {
-                    println!("VRAM bounds error: tile_addr=0x{:04X}, tile_id=0x{:02X}, signed_mode={}", 
-                        tile_addr, tile_id, !self.lcdc.bg_window_tile_data);
-                }
-            }
             return 0; // Return transparent for out-of-bounds
         }
 
@@ -634,60 +504,7 @@ impl PPU {
         let low_bit = (low_byte >> bit_pos) & 1;
         let high_bit = (high_byte >> bit_pos) & 1;
 
-        let color = (high_bit << 1) | low_bit;
-        
-        // Debug tile data access for Pokemon Red - especially tile 0x7F
-        static mut TILE_DEBUG_COUNT: u32 = 0;
-        unsafe {
-            TILE_DEBUG_COUNT += 1;
-            if tile_id == 0x7F && TILE_DEBUG_COUNT <= 3 { // Only debug first 3 tile 0x7F accesses
-                let signed_id = tile_id as i8;
-                let has_graphics_data = low_byte != 0 || high_byte != 0;
-                println!("🔍 Tile Debug #{}: tile_id=0x{:02X} (signed={}), signed_mode={}, VRAM_addr=0x{:04X}, low=0x{:02X}, high=0x{:02X}, color={}, has_data={}", 
-                    TILE_DEBUG_COUNT, tile_id, signed_id, !self.lcdc.bg_window_tile_data, tile_addr, low_byte, high_byte, color, has_graphics_data);
-                
-                // For tile 0x7F specifically, let's check if there's ANY data in this tile
-                if tile_id == 0x7F {
-                    let mut tile_has_any_data = false;
-                    for i in 0..16 {
-                        if tile_addr + i < VRAM_SIZE && self.vram[tile_addr + i] != 0 {
-                            tile_has_any_data = true;
-                            break;
-                        }
-                    }
-                    println!("🎯 TILE 0x7F ANALYSIS: VRAM_addr=0x{:04X}, tile_has_any_data={}", tile_addr, tile_has_any_data);
-                    
-                    // Show ALL 16 bytes of this tile to see the stripe pattern
-                    if tile_addr + 15 < VRAM_SIZE {
-                        println!("🎯 TILE 0x7F FULL DATA: [{:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}]", 
-                            self.vram[tile_addr], self.vram[tile_addr+1], self.vram[tile_addr+2], self.vram[tile_addr+3],
-                            self.vram[tile_addr+4], self.vram[tile_addr+5], self.vram[tile_addr+6], self.vram[tile_addr+7],
-                            self.vram[tile_addr+8], self.vram[tile_addr+9], self.vram[tile_addr+10], self.vram[tile_addr+11],
-                            self.vram[tile_addr+12], self.vram[tile_addr+13], self.vram[tile_addr+14], self.vram[tile_addr+15]);
-                    }
-                    
-                    // Check if Pokemon Red is using a different tile for the background
-                    println!("🔍 CHECKING OTHER COMMON TILES:");
-                    // Check tile 0x00 (often blank/space)
-                    let tile_00_addr = 0x0000;
-                    if tile_00_addr + 7 < VRAM_SIZE {
-                        println!("Tile 0x00 data: [{:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}]", 
-                            self.vram[tile_00_addr], self.vram[tile_00_addr+1], self.vram[tile_00_addr+2], self.vram[tile_00_addr+3],
-                            self.vram[tile_00_addr+4], self.vram[tile_00_addr+5], self.vram[tile_00_addr+6], self.vram[tile_00_addr+7]);
-                    }
-                }
-                
-                if color != 0 {
-                    println!("*** NON-ZERO COLOR FOUND! *** Checking VRAM around 0x{:04X}", tile_addr);
-                    for i in 0..16 {
-                        print!("{:02X} ", self.vram[tile_addr + i]);
-                    }
-                    println!();
-                }
-            }
-        }
-        
-        color
+        (high_bit << 1) | low_bit
     }
 
     // Memory-mapped I/O read
@@ -697,17 +514,7 @@ impl PPU {
             STAT_ADDR => self.stat_to_byte(),
             SCY_ADDR => self.scy,
             SCX_ADDR => self.scx,
-            LY_ADDR => {
-                // BOOT ROM DEBUG: Track LY register reads during boot ROM VBLANK wait
-                static mut LY_READ_COUNT: u32 = 0;
-                unsafe {
-                    LY_READ_COUNT += 1;
-                    if LY_READ_COUNT % 50 == 0 && self.ly > 90 {
-                        println!("🎮 LY Register Read #{}: returning LY={}", LY_READ_COUNT, self.ly);
-                    }
-                }
-                self.ly
-            },
+            LY_ADDR => self.ly,
             LYC_ADDR => self.lyc,
             DMA_ADDR => self.dma,
             BGP_ADDR => self.palette_to_byte(&self.bgp),
@@ -723,57 +530,15 @@ impl PPU {
     pub fn write_register(&mut self, addr: u16, value: u8) {
         match addr {
             LCDC_ADDR => {
-                let old_lcd_enable = self.lcdc.lcd_enable;
                 self.lcdc = self.byte_to_lcdc(value);
-                
-                // DEBUG: Always show LCDC writes, especially LCD enable/disable changes
-                println!("🖥️ LCDC WRITE: 0x{:02X} - LCD:{} BG:{} Sprites:{} BG_Map:{} Tile_Data:{}", 
-                         value, self.lcdc.lcd_enable, self.lcdc.bg_window_enable, 
-                         self.lcdc.sprite_enable, self.lcdc.bg_tile_map, self.lcdc.bg_window_tile_data);
-                
-                // POKEMON RED DEBUG: Check when Pokemon Red enables full graphics
-                if value == 0xE3 {
-                    println!("🎮 POKEMON RED: Full graphics enabled! LCD + BG + Sprites active");
-                }
-                
-                // TEMPORARILY DISABLED: Let Pokemon Red control LCD normally
-                // if !self.lcdc.lcd_enable && value == 0x00 {
-                //     println!("🔧 FORCING LCD TO STAY ENABLED for Pokemon Red graphics testing!");
-                //     self.lcdc.lcd_enable = true;
-                //     self.lcdc.bg_window_enable = true;
-                // }
-                
-                if old_lcd_enable != self.lcdc.lcd_enable {
-                    if self.lcdc.lcd_enable {
-                        println!("🎮 LCD ENABLED! Graphics should start rendering now!");
-                    } else {
-                        println!("⚠️ LCD DISABLED! No graphics will render!");
-                    }
-                }
             },
             STAT_ADDR => self.stat = self.byte_to_stat(value),
-            SCY_ADDR => {
-                self.scy = value;
-                if value != 0 {
-                    println!("SCY set to: {}", value);
-                }
-            },
-            SCX_ADDR => {
-                self.scx = value;
-                if value != 0 {
-                    println!("SCX set to: {}", value);
-                }
-            },
+            SCY_ADDR => self.scy = value,
+            SCX_ADDR => self.scx = value,
             LY_ADDR => {}, // Read-only
             LYC_ADDR => self.lyc = value,
             DMA_ADDR => self.dma = value,
-            BGP_ADDR => {
-                self.bgp = Palette::from_byte(value);
-                if value != 0 {
-                    println!("BGP set to: 0x{:02X} - Color mapping: 0={:?}, 1={:?}, 2={:?}, 3={:?}", 
-                        value, self.bgp.colors[0], self.bgp.colors[1], self.bgp.colors[2], self.bgp.colors[3]);
-                }
-            },
+            BGP_ADDR => self.bgp = Palette::from_byte(value),
             OBP0_ADDR => self.obp0 = Palette::from_byte(value),
             OBP1_ADDR => self.obp1 = Palette::from_byte(value),
             WY_ADDR => self.wy = value,

@@ -14,7 +14,12 @@ fn test_gameboy_integration() {
 
     gameboy.load_cartridge(test_rom);
 
-    assert_eq!(gameboy.cpu.pc, 0x0100);
+    // CPU now starts at 0x0000 while the boot ROM is enabled.
+    assert_eq!(gameboy.cpu.pc, 0x0000);
+
+    // Disable boot ROM so we can execute deterministic test code from cartridge entrypoint.
+    gameboy.cpu.bus.write_byte(0xFF50, 0x01);
+    gameboy.cpu.pc = 0x0100;
 
     // Check that memory was loaded correctly
     assert_eq!(gameboy.cpu.bus.read_byte(0x0100), 0x3E);

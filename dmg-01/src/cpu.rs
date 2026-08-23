@@ -48,68 +48,15 @@ impl CPU {
     }
 
     pub fn step(&mut self) {
-        // Debug: Track Pokemon Red execution progress
-        static mut EXECUTION_DEBUG_COUNT: u32 = 0;
-        unsafe {
-            EXECUTION_DEBUG_COUNT += 1;
-            if EXECUTION_DEBUG_COUNT % 50000 == 0 { // Every 50k instructions
-                println!("🔄 Pokemon Red executing: PC=0x{:04X}, SP=0x{:04X}, cycles={}", 
-                    self.pc, self.sp, EXECUTION_DEBUG_COUNT);
-                
-                // Check if PC is stuck in a loop  
-                static mut LAST_PC: u16 = 0;
-                static mut STUCK_COUNT: u32 = 0;
-                if LAST_PC == self.pc {
-                    STUCK_COUNT += 1;
-                    if STUCK_COUNT == 1 {
-                        println!("⚠️ CPU might be stuck at PC=0x{:04X}", self.pc);
-                        // Show the instruction that's causing the loop
-                        let opcode = self.bus.read_byte(self.pc);
-                        println!("  Instruction at PC=0x{:04X}: 0x{:02X}", self.pc, opcode);
-                        
-                        // Show interrupt state
-                        println!("  IME={}, IE=0x{:02X}, IF=0x{:02X}, halted={}", 
-                            self.ime, self.ie_register, self.if_register, self.halted);
-                        
-                        // Show if VBLANK interrupt is enabled and pending
-                        let vblank_enabled = (self.ie_register & (1 << VBLANK_BIT)) != 0;
-                        let vblank_pending = (self.if_register & (1 << VBLANK_BIT)) != 0;
-                        println!("  VBLANK: enabled={}, pending={}", vblank_enabled, vblank_pending);
-                        
-                        // DEBUG: Show memory content around PC to understand the issue
-                        println!("  Memory around PC:");
-                        for i in 0..8 {
-                            let addr = self.pc.wrapping_add(i);
-                            let byte = self.bus.read_byte(addr);
-                            println!("    0x{:04X}: 0x{:02X}", addr, byte);
-                        }
-                        
-                        // Check if we're reading from boot ROM or cartridge
-                        println!("  Boot ROM enabled: {}", self.bus.boot_rom_enabled);
-                        if self.pc < 0x0100 && !self.bus.boot_rom_enabled {
-                            println!("  WARNING: Reading from cartridge ROM in boot ROM address range!");
-                        }
-                        
-                        // BOOT ROM VBLANK DEBUG: If stuck at 0x0068, check LY register
-                        if self.pc == 0x0068 && self.bus.boot_rom_enabled {
-                            let ly_value = self.bus.read_byte(0xFF44);
-                            println!("  🎮 BOOT ROM VBLANK WAIT: LY={} (waiting for LY=144 to exit loop)", ly_value);
-                            println!("  🎮 PPU State: ly={}, mode={:?}, clock={}", 
-                                self.bus.ppu.ly, self.bus.ppu.stat.mode, self.bus.ppu.mode_clock);
-                        }
-                    }
-                } else {
-                    STUCK_COUNT = 0;
-                }
-                LAST_PC = self.pc;
-            }
-        }
-        
         // Handle EI delay (EI enables interrupts on the next instruction)
         if self.ei_delay {
             self.ime = true;
             self.ei_delay = false;
         }
+
+        // Pull latest IE/IF values from memory-mapped registers.
+        self.ie_register = self.bus.ie_register;
+        self.if_register = self.bus.if_register & 0x1F;
         
         // Check for interrupts first
         if self.check_and_handle_interrupts() {
@@ -273,6 +220,10 @@ impl CPU {
             0x85 => Instruction::ADD(ArithmeticTarget::L),
             0x86 => Instruction::ADD(ArithmeticTarget::HLIndirect),
             0x87 => Instruction::ADD(ArithmeticTarget::A),
+            0x09 => Instruction::ADDHL(AddHLTarget::BC),
+            0x19 => Instruction::ADDHL(AddHLTarget::DE),
+            0x29 => Instruction::ADDHL(AddHLTarget::HL),
+            0x39 => Instruction::ADDHL(AddHLTarget::SP),
             
             // SUB A, r8
             0x90 => Instruction::SUB(ArithmeticTarget::B),
@@ -340,6 +291,9 @@ impl CPU {
             0xE5 => Instruction::PUSH(StackTarget::HL),
             0xF1 => Instruction::POP(StackTarget::AF),
             0xF5 => Instruction::PUSH(StackTarget::AF),
+            0xF8 => Instruction::LDHLSPe8,
+            0xF9 => Instruction::LDSPHL,
+            0x08 => Instruction::LDA16SP,
             
             // Jump conditions
             0xC2 => Instruction::JP(JumpCondition::NotZero),
@@ -347,6 +301,7 @@ impl CPU {
             0xCA => Instruction::JP(JumpCondition::Zero),
             0xD2 => Instruction::JP(JumpCondition::NotCarry),
             0xDA => Instruction::JP(JumpCondition::Carry),
+            0xE9 => Instruction::JPHL,
             
             // Call conditions
             0xC4 => Instruction::CALL(JumpCondition::NotZero),
@@ -416,7 +371,7 @@ impl CPU {
             0xEF => Instruction::RST(0x28),
             0xF7 => Instruction::RST(0x30),
             0xFF => Instruction::RST(0x38),
-            _ => Instruction::NOP,
+            _ => panic!("Unknown opcode 0x{:02X} at PC=0x{:04X}", opcode, self.pc.wrapping_sub(1)),
         }
     }
 
@@ -490,6 +445,9 @@ impl CPU {
                 let value = self.get_arithmetic_target_value(target);
                 self.add(value);
             }
+            Instruction::ADDHL(target) => {
+                self.add_hl(target);
+            }
             Instruction::SUB(target) => {
                 let value = self.get_arithmetic_target_value(target);
                 self.sub(value);
@@ -524,6 +482,33 @@ impl CPU {
             Instruction::LD(target) => {
                 self.load(target);
             }
+            Instruction::LDHLSPe8 => {
+                let offset = self.bus.read_byte(self.pc) as i8;
+                self.pc = self.pc.wrapping_add(1);
+
+                let sp = self.sp;
+                let offset_u16 = (offset as i16) as u16;
+                let result = sp.wrapping_add(offset_u16);
+
+                self.registers.f.zero = false;
+                self.registers.f.subtract = false;
+                self.registers.f.half_carry = ((sp & 0x000F) + (offset_u16 & 0x000F)) > 0x000F;
+                self.registers.f.carry = ((sp & 0x00FF) + (offset_u16 & 0x00FF)) > 0x00FF;
+                self.registers.set_hl(result);
+            }
+            Instruction::LDSPHL => {
+                self.sp = self.registers.get_hl();
+            }
+            Instruction::LDA16SP => {
+                let low = self.bus.read_byte(self.pc) as u16;
+                self.pc = self.pc.wrapping_add(1);
+                let high = self.bus.read_byte(self.pc) as u16;
+                self.pc = self.pc.wrapping_add(1);
+                let address = (high << 8) | low;
+
+                self.bus.write_byte(address, (self.sp & 0x00FF) as u8);
+                self.bus.write_byte(address.wrapping_add(1), ((self.sp & 0xFF00) >> 8) as u8);
+            }
             Instruction::PUSH(target) => {
                 self.push(target);
             }
@@ -532,6 +517,9 @@ impl CPU {
             }
             Instruction::JP(condition) => {
                 self.jump(condition);
+            }
+            Instruction::JPHL => {
+                self.pc = self.registers.get_hl();
             }
             Instruction::JR(condition) => {
                 self.jump_relative(condition);
@@ -1184,6 +1172,22 @@ impl CPU {
         self.registers.a = new_value;
     }
 
+    pub fn add_hl(&mut self, target: AddHLTarget) {
+        let hl = self.registers.get_hl();
+        let value = match target {
+            AddHLTarget::BC => self.registers.get_bc(),
+            AddHLTarget::DE => self.registers.get_de(),
+            AddHLTarget::HL => self.registers.get_hl(),
+            AddHLTarget::SP => self.sp,
+        };
+
+        let result = hl.wrapping_add(value);
+        self.registers.f.subtract = false;
+        self.registers.f.half_carry = (hl & 0x0FFF) + (value & 0x0FFF) > 0x0FFF;
+        self.registers.f.carry = (hl as u32) + (value as u32) > 0xFFFF;
+        self.registers.set_hl(result);
+    }
+
     pub fn sub(&mut self, value: u8) {
         let (new_value, did_overflow) = self.registers.a.overflowing_sub(value);
         self.registers.f.zero = new_value == 0;
@@ -1739,9 +1743,9 @@ impl CPU {
     }
 
     fn update_interrupt_flags(&mut self) {
-        // Sync interrupt registers between CPU and memory bus
-        self.bus.ie_register = self.ie_register;
-        self.bus.if_register = self.if_register;
+        // Pull latest IE/IF writes performed through memory-mapped I/O.
+        self.ie_register = self.bus.ie_register;
+        self.if_register = self.bus.if_register & 0x1F;
         
         // BOOT ROM TIMING FIX: Use more accurate cycle timing during boot ROM VBLANK wait
         // The boot ROM gets stuck because it executes too fast relative to PPU timing
@@ -1808,6 +1812,8 @@ impl CPU {
         for i in 0..5 {
             if (pending_interrupts & (1 << i)) != 0 {
                 self.handle_interrupt(i);
+                self.bus.ie_register = self.ie_register;
+                self.bus.if_register = self.if_register;
                 return true;
             }
         }

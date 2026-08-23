@@ -1,6 +1,7 @@
 #[derive(Debug)]
 pub enum Instruction {
     ADD(ArithmeticTarget),
+    ADDHL(AddHLTarget),
     SUB(ArithmeticTarget),
     AND(ArithmeticTarget),
     OR(ArithmeticTarget),
@@ -9,9 +10,13 @@ pub enum Instruction {
     INC(IncDecTarget),
     DEC(IncDecTarget),
     LD(LoadTarget),
+    LDHLSPe8,
+    LDSPHL,
+    LDA16SP,
     PUSH(StackTarget),
     POP(StackTarget),
     JP(JumpCondition),
+    JPHL,
     JR(JumpCondition),
     CALL(JumpCondition),
     RET(JumpCondition),
@@ -54,6 +59,14 @@ pub enum ArithmeticTarget {
     L,
     HLIndirect,
     D8,
+}
+
+#[derive(Debug)]
+pub enum AddHLTarget {
+    BC,
+    DE,
+    HL,
+    SP,
 }
 
 #[derive(Debug)]
