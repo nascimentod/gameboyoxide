@@ -44,8 +44,9 @@ pub enum Instruction {
     CPL,                    // Complement A
     EI,                     // Enable Interrupts
     DI,                     // Disable Interrupts
-    RETI,                   // Return from Interrupt
-    RST(u8),                // Reset (call to fixed address)
+    RETI,                    // Return from Interrupt
+    RST(u8),                 // Reset (call to fixed address)
+    ED(u8),                  // ED-prefixed instruction (secondary opcode)
 }
 
 #[derive(Debug)]

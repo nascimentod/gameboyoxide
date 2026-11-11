@@ -369,9 +369,14 @@ impl CPU {
             0xDF => Instruction::RST(0x18),
             0xE7 => Instruction::RST(0x20),
             0xEF => Instruction::RST(0x28),
-            0xF7 => Instruction::RST(0x30),
-            0xFF => Instruction::RST(0x38),
-            _ => panic!("Unknown opcode 0x{:02X} at PC=0x{:04X}", opcode, self.pc.wrapping_sub(1)),
+             0xF7 => Instruction::RST(0x30),
+             0xFF => Instruction::RST(0x38),
+             0xED => {
+                 let ed_opcode = self.bus.read_byte(self.pc);
+                 self.pc = self.pc.wrapping_add(1);
+                 Instruction::ED(ed_opcode)
+             }
+             _ => panic!("Unknown opcode 0x{:02X} at PC=0x{:04X}", opcode, self.pc.wrapping_sub(1)),
         }
     }
 
@@ -605,33 +610,72 @@ impl CPU {
                 }
             },
             Instruction::RL(target) => {
-                let (value, result) = match target {
+                let (result, carry) = match target {
                     BitTarget::A => {
                         let old_carry = if self.registers.f.carry { 1 } else { 0 };
-                        let new_carry = (self.registers.a & 0x80) != 0;
+                        let carry = (self.registers.a & 0x80) != 0;
                         let result = (self.registers.a << 1) | old_carry;
                         self.registers.a = result;
-                        self.registers.f.carry = new_carry;
-                        (self.registers.a, result)
+                        (result, carry)
+                    }
+                    BitTarget::B => {
+                        let old_carry = if self.registers.f.carry { 1 } else { 0 };
+                        let carry = (self.registers.b & 0x80) != 0;
+                        let result = (self.registers.b << 1) | old_carry;
+                        self.registers.b = result;
+                        (result, carry)
                     }
                     BitTarget::C => {
                         let old_carry = if self.registers.f.carry { 1 } else { 0 };
-                        let new_carry = (self.registers.c & 0x80) != 0;
+                        let carry = (self.registers.c & 0x80) != 0;
                         let result = (self.registers.c << 1) | old_carry;
                         self.registers.c = result;
-                        self.registers.f.carry = new_carry;
-                        (self.registers.c, result)
+                        (result, carry)
                     }
-                    _ => {
-                        // TODO: Implement other targets
-                        (0, 0)
+                    BitTarget::D => {
+                        let old_carry = if self.registers.f.carry { 1 } else { 0 };
+                        let carry = (self.registers.d & 0x80) != 0;
+                        let result = (self.registers.d << 1) | old_carry;
+                        self.registers.d = result;
+                        (result, carry)
+                    }
+                    BitTarget::E => {
+                        let old_carry = if self.registers.f.carry { 1 } else { 0 };
+                        let carry = (self.registers.e & 0x80) != 0;
+                        let result = (self.registers.e << 1) | old_carry;
+                        self.registers.e = result;
+                        (result, carry)
+                    }
+                    BitTarget::H => {
+                        let old_carry = if self.registers.f.carry { 1 } else { 0 };
+                        let carry = (self.registers.h & 0x80) != 0;
+                        let result = (self.registers.h << 1) | old_carry;
+                        self.registers.h = result;
+                        (result, carry)
+                    }
+                    BitTarget::L => {
+                        let old_carry = if self.registers.f.carry { 1 } else { 0 };
+                        let carry = (self.registers.l & 0x80) != 0;
+                        let result = (self.registers.l << 1) | old_carry;
+                        self.registers.l = result;
+                        (result, carry)
+                    }
+                    BitTarget::HLIndirect => {
+                        let address = self.registers.get_hl();
+                        let value = self.bus.read_byte(address);
+                        let old_carry = if self.registers.f.carry { 1 } else { 0 };
+                        let carry = (value & 0x80) != 0;
+                        let result = (value << 1) | old_carry;
+                        self.bus.write_byte(address, result);
+                        (result, carry)
                     }
                 };
-                
+
                 self.registers.f.zero = result == 0;
                 self.registers.f.subtract = false;
                 self.registers.f.half_carry = false;
-            },
+                self.registers.f.carry = carry;
+             },
             Instruction::RLC(target) => {
                 let (result, carry) = match target {
                     BitTarget::A => {
