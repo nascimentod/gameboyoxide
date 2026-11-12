@@ -102,7 +102,12 @@ impl Cartridge {
 
     pub fn write_rom(&mut self, address: u16, value: u8) {
         match self.mbc_type {
-            0x00 => {}
+            0x00 => {
+                // MBC0 - No banking, just RAM enable/disable
+                if address <= 0x1FFF {
+                    self.ram_enabled = (value & 0x0F) == 0x0A;
+                }
+            }
             0x01..=0x03 => {
                 // MBC1 - Complete implementation
                 match address {

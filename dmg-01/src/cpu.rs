@@ -1183,6 +1183,11 @@ impl CPU {
                 self.bus.write_byte(self.sp, (self.pc & 0xFF) as u8);
                 self.pc = address as u16;
             },
+            Instruction::ED(_opcode) => {
+                // ED-prefixed instructions - not yet implemented
+                // These will be discovered by test ROMs
+                panic!("ED opcode 0x{:02X} not yet implemented", _opcode);
+            },
         }
     }
 
@@ -1786,7 +1791,7 @@ impl CPU {
         }
     }
 
-    fn update_interrupt_flags(&mut self) {
+    pub fn update_interrupt_flags(&mut self) {
         // Pull latest IE/IF writes performed through memory-mapped I/O.
         self.ie_register = self.bus.ie_register;
         self.if_register = self.bus.if_register & 0x1F;
@@ -1827,11 +1832,11 @@ impl CPU {
         // TODO: Add joypad interrupt source when implemented
     }
 
-    fn request_interrupt(&mut self, interrupt_bit: u8) {
+    pub fn request_interrupt(&mut self, interrupt_bit: u8) {
         self.if_register |= 1 << interrupt_bit;
     }
 
-    fn check_and_handle_interrupts(&mut self) -> bool {
+    pub fn check_and_handle_interrupts(&mut self) -> bool {
         // Check if any interrupt is both enabled and requested
         let pending_interrupts = self.ie_register & self.if_register;
         
@@ -1865,7 +1870,7 @@ impl CPU {
         false
     }
 
-    fn handle_interrupt(&mut self, interrupt_bit: u8) {
+    pub fn handle_interrupt(&mut self, interrupt_bit: u8) {
         // Disable further interrupts
         self.ime = false;
         
