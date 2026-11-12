@@ -135,6 +135,9 @@ impl CPU {
             0x3D => Instruction::DEC(IncDecTarget::A),
             0x3E => Instruction::LD(LoadTarget::AFromD8),
             
+            // INC SP (0xE8)
+            0xE8 => Instruction::INC(IncDecTarget::SP),
+            
             // More register-to-register loads (0x40-0x7F range)
             0x40 => Instruction::LD(LoadTarget::BFromB), // B <- B (NOP equivalent)
             0x41 => Instruction::LD(LoadTarget::BFromC),
@@ -358,6 +361,7 @@ impl CPU {
             0x2F => Instruction::CPL,
             0x37 => Instruction::SCF,
             0x3F => Instruction::CCF,
+            0xF2 => Instruction::LDH(LDHTarget::AFromC), // LD A,(FF00+C)
             0xF3 => Instruction::DI,
             0xFB => Instruction::EI,
             0xD9 => Instruction::RETI,
