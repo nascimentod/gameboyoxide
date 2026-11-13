@@ -12,6 +12,7 @@ pub struct Registers {
     pub f: FlagsRegister,
     pub h: u8,
     pub l: u8,
+    pub af_prime: u16, // Shadow AF register pair for EX AF,AF'
 }
 
 impl Registers {
@@ -30,6 +31,7 @@ impl Registers {
             },
             h: 0x01,
             l: 0x4D,
+            af_prime: 0x0000, // Shadow register pair, initialized to zero
         }
     }
 

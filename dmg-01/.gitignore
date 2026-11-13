@@ -1,0 +1,15 @@
+# Rust build artifacts
+/target/
+
+# Python cache
+__pycache__/
+
+# macOS metadata
+.DS_Store
+
+# User ROMs and saves
+*.gb
+*.sav
+
+# Build output
+*.dSYM/

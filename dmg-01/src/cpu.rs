@@ -60,7 +60,8 @@ impl CPU {
         
         // Check for interrupts first
         if self.check_and_handle_interrupts() {
-            return; // Interrupt was handled, skip instruction execution
+            self.clock_peripherals(20);
+            return; // Interrupt entry takes five machine cycles.
         }
         
         if self.halted {
@@ -69,11 +70,53 @@ impl CPU {
             return;
         }
 
+        let opcode = self.bus.read_byte(self.pc);
+        let cycles = self.instruction_cycles(opcode);
         let instruction = self.fetch_decode();
+        // Place the final data access at the start of the last machine cycle.
+        // This is important for LDH reads/writes of DIV and APU registers.
+        self.clock_peripherals(cycles - 4);
         self.execute(instruction);
         
         // Update interrupt flags from peripherals
         self.update_interrupt_flags();
+    }
+
+    /// Instruction durations in T-cycles (Pan Docs CPU instruction set).
+    fn instruction_cycles(&self, opcode: u8) -> u32 {
+        const CYCLES: [u8; 256] = [
+            4,12,8,8,4,4,8,4,20,8,8,8,4,4,8,4,
+            4,12,8,8,4,4,8,4,12,8,8,8,4,4,8,4,
+            8,12,8,8,4,4,8,4,8,8,8,8,4,4,8,4,
+            8,12,8,8,12,12,12,4,8,8,8,8,4,4,8,4,
+            4,4,4,4,4,4,8,4,4,4,4,4,4,4,8,4,
+            4,4,4,4,4,4,8,4,4,4,4,4,4,4,8,4,
+            4,4,4,4,4,4,8,4,4,4,4,4,4,4,8,4,
+            8,8,8,8,8,8,4,8,4,4,4,4,4,4,8,4,
+            4,4,4,4,4,4,8,4,4,4,4,4,4,4,8,4,
+            4,4,4,4,4,4,8,4,4,4,4,4,4,4,8,4,
+            4,4,4,4,4,4,8,4,4,4,4,4,4,4,8,4,
+            4,4,4,4,4,4,8,4,4,4,4,4,4,4,8,4,
+            8,12,12,16,12,16,8,16,8,16,12,8,12,24,8,16,
+            8,12,12,4,12,16,8,16,8,16,12,4,12,4,8,16,
+            12,12,8,4,4,16,8,16,16,4,16,4,4,4,8,16,
+            12,12,8,4,4,16,8,16,12,8,16,4,4,4,8,16,
+        ];
+        if opcode == 0xcb {
+            let cb = self.bus.read_byte(self.pc.wrapping_add(1));
+            return if cb & 7 != 6 { 8 } else if cb & 0xc0 == 0x40 { 12 } else { 16 };
+        }
+        let condition = match (opcode >> 3) & 3 {
+            0 => !self.registers.f.zero, 1 => self.registers.f.zero,
+            2 => !self.registers.f.carry, _ => self.registers.f.carry,
+        };
+        u32::from(CYCLES[opcode as usize]) + if condition {
+            match opcode {
+                0x20 | 0x28 | 0x30 | 0x38 | 0xc2 | 0xca | 0xd2 | 0xda => 4,
+                0xc4 | 0xcc | 0xd4 | 0xdc | 0xc0 | 0xc8 | 0xd0 | 0xd8 => 12,
+                _ => 0,
+            }
+        } else { 0 }
     }
 
     pub fn fetch_decode(&mut self) -> Instruction {
@@ -134,6 +177,9 @@ impl CPU {
             0x3C => Instruction::INC(IncDecTarget::A),
             0x3D => Instruction::DEC(IncDecTarget::A),
             0x3E => Instruction::LD(LoadTarget::AFromD8),
+            
+            // INC SP (0xE8)
+            0xE8 => Instruction::INC(IncDecTarget::SP),
             
             // More register-to-register loads (0x40-0x7F range)
             0x40 => Instruction::LD(LoadTarget::BFromB), // B <- B (NOP equivalent)
@@ -358,6 +404,7 @@ impl CPU {
             0x2F => Instruction::CPL,
             0x37 => Instruction::SCF,
             0x3F => Instruction::CCF,
+            0xF2 => Instruction::LDH(LDHTarget::AFromC), // LD A,(FF00+C)
             0xF3 => Instruction::DI,
             0xFB => Instruction::EI,
             0xD9 => Instruction::RETI,
@@ -1183,6 +1230,258 @@ impl CPU {
                 self.bus.write_byte(self.sp, (self.pc & 0xFF) as u8);
                 self.pc = address as u16;
             },
+            Instruction::ED(opcode) => {
+                match opcode {
+                    // EX AF,AF'
+                    0x08 => {
+                        let temp = self.registers.af_prime;
+                        let current_af = self.registers.get_af();
+                        self.registers.set_af(self.registers.af_prime);
+                        self.registers.af_prime = current_af;
+                    },
+                    // STOP (ignore operand, just halt)
+                    0x10 => {
+                        let _stop_arg = self.bus.read_byte(self.pc);
+                        self.pc = self.pc.wrapping_add(1);
+                    },
+                    // LDHL SP,e (signed offset)
+                    0x28 => {
+                        let offset = self.bus.read_byte(self.pc) as i8 as i16 as i32;
+                        self.pc = self.pc.wrapping_add(1);
+                        let sp = self.sp as i32;
+                        let result = (sp + offset) as u16;
+                        self.registers.set_hl(result);
+                        self.registers.f.zero = false;
+                        self.registers.f.subtract = false;
+                        self.registers.f.half_carry = ((sp & 0xFFF) + (offset as i32 & 0xF)) > 0xF;
+                        self.registers.f.carry = (sp as u16).wrapping_add(offset as u16 as u16) < (sp as u16);
+                    },
+                    // DAA - Decimal Adjust Accumulator
+                    0x27 => {
+                        let mut result = self.registers.a;
+                        let mut adjust = 0u8;
+                        
+                        if self.registers.f.half_carry || (!self.registers.f.subtract && (result & 0x0F) > 9) {
+                            if self.registers.f.subtract {
+                                if (result & 0x0F) > 9 || self.registers.f.half_carry {
+                                    adjust = 0xFA; // -0x06 in two's complement
+                                }
+                            } else {
+                                adjust = 0x06;
+                            }
+                        }
+                        
+                        if self.registers.f.carry || (!self.registers.f.subtract && result > 0x99) {
+                            if self.registers.f.subtract {
+                                if result > 0x99 || self.registers.f.carry {
+                                    adjust = adjust.wrapping_add(0xFA); // -0x60
+                                }
+                            } else {
+                                adjust = adjust.wrapping_add(0x60);
+                            }
+                            self.registers.f.carry = true;
+                        }
+                        
+                        result = if self.registers.f.subtract {
+                            result.wrapping_sub(adjust)
+                        } else {
+                            result.wrapping_add(adjust)
+                        };
+                        
+                        self.registers.f.zero = result == 0;
+                        self.registers.f.half_carry = false;
+                        self.registers.a = result;
+                    },
+                    // CPL
+                    0x2F => {
+                        self.registers.a = !self.registers.a;
+                        self.registers.f.subtract = true;
+                        self.registers.f.half_carry = true;
+                    },
+                    // CCF
+                    0x37 => {
+                        self.registers.f.carry = !self.registers.f.carry;
+                        self.registers.f.subtract = false;
+                        self.registers.f.half_carry = false;
+                    },
+                    // SCF
+                    0x3F => {
+                        self.registers.f.carry = true;
+                        self.registers.f.subtract = false;
+                        self.registers.f.half_carry = false;
+                    },
+                    // 0x40-0x7F: LD and SWAP instructions - handled in inner match
+                    _ => {
+                        // Handle the full 0x40-0x7F range systematically
+                        match opcode {
+                            // LD B,r: 0x40-0x47
+                            0x40..=0x47 => {
+                                let src = self.bus.read_byte(self.pc) & 0x07;
+                                self.pc = self.pc.wrapping_add(1);
+                                self.registers.b = self.get_register(src);
+                            },
+                            // LD C,r: 0x48-0x4F
+                            0x48..=0x4F => {
+                                let src = self.bus.read_byte(self.pc) & 0x07;
+                                self.pc = self.pc.wrapping_add(1);
+                                self.registers.c = self.get_register(src);
+                            },
+                            // LD D,r: 0x50-0x57
+                            0x50..=0x57 => {
+                                let src = self.bus.read_byte(self.pc) & 0x07;
+                                self.pc = self.pc.wrapping_add(1);
+                                self.registers.d = self.get_register(src);
+                            },
+                            // LD E,r: 0x58-0x5F
+                            0x58..=0x5F => {
+                                let src = self.bus.read_byte(self.pc) & 0x07;
+                                self.pc = self.pc.wrapping_add(1);
+                                self.registers.e = self.get_register(src);
+                            },
+                            // LD H,r: 0x60-0x67
+                            0x60..=0x67 => {
+                                let src = self.bus.read_byte(self.pc) & 0x07;
+                                self.pc = self.pc.wrapping_add(1);
+                                self.registers.h = self.get_register(src);
+                            },
+                            // LD L,r: 0x68-0x6F
+                            0x68..=0x6F => {
+                                let src = self.bus.read_byte(self.pc) & 0x07;
+                                self.pc = self.pc.wrapping_add(1);
+                                self.registers.l = self.get_register(src);
+                            },
+                            // LD (HL),r: 0x60-0x67
+                            0x60..=0x67 => {
+                                let src = self.bus.read_byte(self.pc) & 0x07;
+                                self.pc = self.pc.wrapping_add(1);
+                                let hl = self.registers.get_hl();
+                                self.bus.write_byte(hl, self.get_register(src));
+                            },
+                            // LD A,(HL): 0x46 - already handled above
+                            // LD (HL),A: 0x77 - already handled above
+                            // LD A,r: 0x78-0x7F
+                            0x78..=0x7F => {
+                                let src = self.bus.read_byte(self.pc) & 0x07;
+                                self.pc = self.pc.wrapping_add(1);
+                                self.registers.a = self.get_register(src);
+                            },
+                            // LD (HL),A: 0x77 - handled above
+                            // LD r,A: 0x78-0x7F - already handled above
+                            // LD r,n: 0x06,0x0E,0x16,0x1E,0x26,0x2E,0x36,0x3E - these are non-ED
+                            // LD (d16),BC: 0x02 - non-ED
+                            // LD A,(d16): 0x3A
+                            0x3A => {
+                                let addr = self.read_le16();
+                                self.registers.a = self.bus.read_byte(addr);
+                            },
+                            // LD (d16),A: 0x3A
+                            0x3B => {
+                                let addr = self.read_le16();
+                                self.bus.write_byte(addr, self.registers.a);
+                            },
+                            // INC rr: 0x03,0x13,0x23,0x33
+                            0x03 => {
+                                let bc = self.registers.get_bc() as u32;
+                                self.registers.set_bc(((bc + 1) & 0xFFFF) as u16);
+                            },
+                            0x13 => {
+                                let de = self.registers.get_de() as u32;
+                                self.registers.set_de(((de + 1) & 0xFFFF) as u16);
+                            },
+                            0x23 => {
+                                let hl = self.registers.get_hl() as u32;
+                                self.registers.set_hl(((hl + 1) & 0xFFFF) as u16);
+                            },
+                            0x33 => {
+                                let sp = self.sp as u32;
+                                self.sp = ((sp + 1) & 0xFFFF) as u16;
+                            },
+                            // DEC rr: 0x0B,0x1B,0x2B,0x3B
+                            0x0B => {
+                                let bc = self.registers.get_bc() as u32;
+                                self.registers.set_bc(((bc - 1) & 0xFFFF) as u16);
+                            },
+                            0x1B => {
+                                    let de = self.registers.get_de() as u32;
+                                self.registers.set_de(((de - 1) & 0xFFFF) as u16);
+                            },
+                            0x2B => {
+                                let hl = self.registers.get_hl() as u32;
+                                self.registers.set_hl(((hl - 1) & 0xFFFF) as u16);
+                            },
+                            0x3B => {
+                                let sp = self.sp as u32;
+                                self.sp = ((sp - 1) & 0xFFFF) as u16;
+                            },
+                            // ADD HL,rr: 0x09,0x19,0x29,0x39
+                            0x09 => {
+                                let hl = self.registers.get_hl() as u32;
+                                let rr = self.registers.get_bc() as u32;
+                                let carry = (hl + rr) > 0xFFFF;
+                                let half_carry = ((hl & 0xFFF) + (rr & 0xFFF)) > 0xFFF;
+                                self.registers.set_hl(((hl + rr) & 0xFFFF) as u16);
+                                self.registers.f.zero = false;
+                                self.registers.f.subtract = false;
+                                self.registers.f.half_carry = half_carry;
+                                self.registers.f.carry = carry;
+                            },
+                            0x19 => {
+                                let hl = self.registers.get_hl() as u32;
+                                let rr = self.registers.get_de() as u32;
+                                let carry = (hl + rr) > 0xFFFF;
+                                let half_carry = ((hl & 0xFFF) + (rr & 0xFFF)) > 0xFFF;
+                                self.registers.set_hl(((hl + rr) & 0xFFFF) as u16);
+                                self.registers.f.zero = false;
+                                self.registers.f.subtract = false;
+                                self.registers.f.half_carry = half_carry;
+                                self.registers.f.carry = carry;
+                            },
+                            0x29 => {
+                                let hl = self.registers.get_hl() as u32;
+                                let rr = (self.registers.get_hl() as u32) << 1;
+                                let carry = (hl + rr) > 0xFFFF;
+                                let half_carry = ((hl & 0xFFF) + (rr & 0xFFF)) > 0xFFF;
+                                self.registers.set_hl(((hl + rr) & 0xFFFF) as u16);
+                                self.registers.f.zero = false;
+                                self.registers.f.subtract = false;
+                                self.registers.f.half_carry = half_carry;
+                                self.registers.f.carry = carry;
+                            },
+                            0x39 => {
+                                let hl = self.registers.get_hl() as u32;
+                                let sp = self.sp as u32;
+                                let carry = (hl + sp) > 0xFFFF;
+                                let half_carry = ((hl & 0xFFF) + (sp & 0xFFF)) > 0xFFF;
+                                self.registers.set_hl(((hl + sp) & 0xFFFF) as u16);
+                                self.registers.f.zero = false;
+                                self.registers.f.subtract = false;
+                                self.registers.f.half_carry = half_carry;
+                                self.registers.f.carry = carry;
+                            },
+                            // SWAP r: 0x30-0x37
+                            0x30..=0x37 => {
+                                let reg = self.bus.read_byte(self.pc) & 0x07;
+                                self.pc = self.pc.wrapping_add(1);
+                                let val = self.get_register(reg);
+                                let swapped = ((val << 4) | (val >> 4)) & 0xFF;
+                                self.set_register(reg, swapped);
+                                self.registers.f.zero = swapped == 0;
+                                self.registers.f.subtract = false;
+                                self.registers.f.half_carry = false;
+                                self.registers.f.carry = false;
+                            },
+                            // Bit tests: 0x40-0x7F (BIT n,r and BIT n,(HL))
+                            // These are handled in CB-like pattern
+                            // ED 0x40-0x7F: BIT n,reg for 0x40-0x77, BIT n,(HL) for 0x7F
+                            _ => {
+                                // Unknown ED opcode - log and skip
+                                // We'll discover these from test ROMs
+                                self.pc = self.pc.wrapping_add(1);
+                            }
+                        }
+                    }
+                }
+            },
         }
     }
 
@@ -1786,21 +2085,15 @@ impl CPU {
         }
     }
 
-    fn update_interrupt_flags(&mut self) {
+    pub fn update_interrupt_flags(&mut self) {
         // Pull latest IE/IF writes performed through memory-mapped I/O.
         self.ie_register = self.bus.ie_register;
         self.if_register = self.bus.if_register & 0x1F;
         
-        // BOOT ROM TIMING FIX: Use more accurate cycle timing during boot ROM VBLANK wait
-        // The boot ROM gets stuck because it executes too fast relative to PPU timing
-        let cycles = if self.bus.boot_rom_enabled && (self.pc >= 0x0064 && self.pc <= 0x0069) {
-            // Boot ROM VBLANK wait loop - use more cycles to slow down CPU relative to PPU
-            // This ensures LY=144 window lasts long enough for detection
-            8  // Increase from 4 to 8 cycles for proper timing
-        } else {
-            4  // Normal timing for other code
-        };
-        
+        self.clock_peripherals(4);
+    }
+
+    fn clock_peripherals(&mut self, cycles: u32) {
         let (vblank_interrupt, stat_interrupt, timer_interrupt, joypad_interrupt) = self.bus.step(cycles);
         
         // Update interrupt flags based on peripheral events
@@ -1827,11 +2120,11 @@ impl CPU {
         // TODO: Add joypad interrupt source when implemented
     }
 
-    fn request_interrupt(&mut self, interrupt_bit: u8) {
+    pub fn request_interrupt(&mut self, interrupt_bit: u8) {
         self.if_register |= 1 << interrupt_bit;
     }
 
-    fn check_and_handle_interrupts(&mut self) -> bool {
+    pub fn check_and_handle_interrupts(&mut self) -> bool {
         // Check if any interrupt is both enabled and requested
         let pending_interrupts = self.ie_register & self.if_register;
         
@@ -1865,7 +2158,7 @@ impl CPU {
         false
     }
 
-    fn handle_interrupt(&mut self, interrupt_bit: u8) {
+    pub fn handle_interrupt(&mut self, interrupt_bit: u8) {
         // Disable further interrupts
         self.ime = false;
         
@@ -1917,5 +2210,47 @@ impl CPU {
 
     pub fn get_joypad_state(&self) -> crate::joypad::JoypadState {
         self.bus.get_joypad_state()
+    }
+
+    // ED opcode helper methods
+    /// Get a register by index (0=A, 1=B, 2=C, 3=D, 4=E, 5=H, 6=L, 7=HL)
+    pub fn get_register(&self, idx: u8) -> u8 {
+        match idx {
+            0 => self.registers.a,
+            1 => self.registers.b,
+            2 => self.registers.c,
+            3 => self.registers.d,
+            4 => self.registers.e,
+            5 => self.registers.h,
+            6 => self.registers.l,
+            7 => {
+                // For LD r,(HL) when reading from HL indirect
+                self.bus.read_byte(self.registers.get_hl())
+            },
+            _ => 0,
+        }
+    }
+
+    /// Set a register by index (0=A, 1=B, 2=C, 3=D, 4=E, 5=H, 6=L)
+    pub fn set_register(&mut self, idx: u8, value: u8) {
+        match idx {
+            0 => self.registers.a = value,
+            1 => self.registers.b = value,
+            2 => self.registers.c = value,
+            3 => self.registers.d = value,
+            4 => self.registers.e = value,
+            5 => self.registers.h = value,
+            6 => self.registers.l = value,
+            _ => {},
+        }
+    }
+
+    /// Read a little-endian 16-bit value from memory (used for LD (d16),rr instructions)
+    pub fn read_le16(&mut self) -> u16 {
+        let low = self.bus.read_byte(self.pc) as u16;
+        self.pc = self.pc.wrapping_add(1);
+        let high = self.bus.read_byte(self.pc) as u16;
+        self.pc = self.pc.wrapping_add(1);
+        (high << 8) | low
     }
 }

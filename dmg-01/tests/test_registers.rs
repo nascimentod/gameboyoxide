@@ -11,6 +11,7 @@ fn test_registers_16bit_operations() {
         f: FlagsRegister::from(0xB0),
         h: 0xBC,
         l: 0xDE,
+        af_prime: 0x0000,
     };
 
     assert_eq!(registers.get_bc(), 0x3456);

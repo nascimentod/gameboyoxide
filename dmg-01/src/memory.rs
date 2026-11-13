@@ -1,3 +1,4 @@
+use crate::apu::Apu;
 use crate::cartridge::Cartridge;
 use crate::joypad::Joypad;
 use crate::ppu::PPU;
@@ -7,9 +8,17 @@ pub struct MemoryBus {
     pub memory: [u8; 0x10000],
     pub cartridge: Option<Cartridge>,
     pub ppu: PPU,
+    pub apu: Apu,
     pub timer: Timer,
     pub joypad: Joypad,
     pub boot_rom_enabled: bool,
+    /// Elapsed DMG T-cycles, used for host audio/video pacing.
+    pub elapsed_cycles: u64,
+    // OAM DMA: one startup M-cycle, then 160 bytes at one byte / M-cycle.
+    dma_source: u16,
+    dma_index: u16,
+    dma_cycles: u32,
+    dma_startup: bool,
     
     // Interrupt register access functions (will be set by CPU)
     pub ie_register: u8,
@@ -22,9 +31,15 @@ impl MemoryBus {
             memory: [0; 0x10000],
             cartridge: None,
             ppu: PPU::new(),
+            apu: Apu::new(),
             timer: Timer::new(),
             joypad: Joypad::new(),
             boot_rom_enabled: true,
+            elapsed_cycles: 0,
+            dma_source: 0,
+            dma_index: 160,
+            dma_cycles: 0,
+            dma_startup: false,
             ie_register: 0x00,
             if_register: 0x00,
         };
@@ -146,7 +161,18 @@ impl MemoryBus {
         // Boot ROM stays at 0x0000-0x00FF until disabled
     }
 
+    fn dma_blocks_cpu(&self, address: u16) -> bool {
+        self.dma_index < 160 && !self.dma_startup
+            && !(0xff80..=0xfffe).contains(&address)
+    }
+
     pub fn read_byte(&self, address: u16) -> u8 {
+        if self.dma_blocks_cpu(address) { return 0xff; }
+        self.read_mapped_byte(address)
+    }
+
+    // DMA uses the actual bus mapping but is not blocked by its own transfer.
+    fn read_mapped_byte(&self, address: u16) -> u8 {
         match address {
             0x0000..=0x7FFF => {
                 // Boot ROM is mapped at 0x0000-0x00FF until disabled
@@ -187,6 +213,7 @@ impl MemoryBus {
                 // Interrupt Flag register (IF)
                 self.if_register | 0xE0 // Upper 3 bits always read as 1
             }
+            0xFF10..=0xFF3F => self.apu.read(address),
             0xFF40..=0xFF4B => {
                 // PPU registers
                 self.ppu.read_register(address)
@@ -205,6 +232,8 @@ impl MemoryBus {
     }
 
     pub fn write_byte(&mut self, address: u16, value: u8) {
+        // DMA can be restarted by another FF46 write, including while active.
+        if self.dma_blocks_cpu(address) && address != 0xff46 { return; }
         match address {
             0x0000..=0x7FFF => {
                 if let Some(cartridge) = &mut self.cartridge {
@@ -233,11 +262,22 @@ impl MemoryBus {
             }
             0xFF04..=0xFF07 => {
                 // Timer registers
+                if address == 0xff04 && self.timer.div_counter & 0x1000 != 0 {
+                    self.apu.div_falling_edge();
+                }
                 self.timer.write_register(address, value);
             }
             0xFF0F => {
                 // Interrupt Flag register (IF)
                 self.if_register = value & 0x1F; // Only lower 5 bits are writable
+            }
+            0xFF10..=0xFF3F => self.apu.write(address, value),
+            0xFF46 => {
+                self.ppu.write_register(address, value);
+                self.dma_source = u16::from(value) << 8;
+                self.dma_index = 0;
+                self.dma_cycles = 0;
+                self.dma_startup = true;
             }
             0xFF40..=0xFF4B => {
                 // PPU registers
@@ -258,8 +298,46 @@ impl MemoryBus {
         }
     }
 
+    fn step_video_and_dma(&mut self, cycles: u32) {
+        if self.dma_index >= 160 {
+            self.ppu.step(cycles);
+            return;
+        }
+        let mut remaining = cycles;
+        while remaining != 0 {
+            let chunk = remaining.min(4 - self.dma_cycles);
+            self.dma_cycles += chunk;
+            remaining -= chunk;
+            if self.dma_cycles == 4 {
+                self.dma_cycles = 0;
+                if self.dma_startup {
+                    self.dma_startup = false;
+                } else if self.dma_index < 160 {
+                    let byte = self.read_mapped_byte(self.dma_source + self.dma_index);
+                    self.ppu.oam[usize::from(self.dma_index)] = byte;
+                    self.dma_index += 1;
+                }
+            }
+            self.ppu.step(chunk);
+        }
+    }
+
     pub fn step(&mut self, cycles: u32) -> (bool, bool, bool, bool) {
-        self.ppu.step(cycles);
+        self.elapsed_cycles = self.elapsed_cycles.wrapping_add(u64::from(cycles));
+        self.step_video_and_dma(cycles);
+        // Preserve waveform/frame-sequencer ordering, even for large steps.
+        let mut remaining = cycles;
+        let mut phase = u32::from(self.timer.div_counter & 0x1fff);
+        while remaining != 0 {
+            let chunk = remaining.min(8192 - phase);
+            self.apu.step(chunk);
+            remaining -= chunk;
+            phase += chunk;
+            if phase == 8192 {
+                self.apu.div_falling_edge();
+                phase = 0;
+            }
+        }
         let timer_interrupt = self.timer.step(cycles);
         let joypad_interrupt = self.joypad.check_and_clear_interrupt();
         
