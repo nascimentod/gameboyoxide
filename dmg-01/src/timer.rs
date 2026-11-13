@@ -28,8 +28,9 @@ impl Timer {
     pub fn step(&mut self, cycles: u32) -> bool {
         let mut interrupt_requested = false;
 
-        // Update DIV register (always runs at CPU speed / 4, so 16384 Hz at 4.194304 MHz)
-        // DIV increments every 256 CPU cycles
+        // div_counter increments at 4,194,304 Hz (T-cycles); the exposed
+        // upper byte DIV increments every 256 T-cycles, at 16,384 Hz.
+        // The APU uses falling edges of internal bit 12 (DIV bit 4).
         self.div_counter = self.div_counter.wrapping_add(cycles as u16);
         self.div_register = (self.div_counter >> 8) as u8;
 

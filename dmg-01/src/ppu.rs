@@ -301,6 +301,7 @@ impl PPU {
         }
 
         let scanline = self.ly as usize;
+        self.framebuffer[scanline * LCD_WIDTH..(scanline + 1) * LCD_WIDTH].fill(Color::White);
         
         // Clear background priority for this scanline
         for i in 0..LCD_WIDTH {
@@ -398,40 +399,38 @@ impl PPU {
             let flags = self.oam[sprite_addr + 3];
 
             // Check if sprite is on this scanline
-            let sprite_top = sprite_y.wrapping_sub(16);
-            let sprite_bottom = sprite_top + sprite_height;
+            let sprite_top = i16::from(sprite_y) - 16;
+            let sprite_bottom = sprite_top + i16::from(sprite_height);
             
-            if scanline as u8 >= sprite_top && (scanline as u8) < sprite_bottom {
+            if scanline as i16 >= sprite_top && (scanline as i16) < sprite_bottom {
                 sprites_on_line.push(Sprite {
                     y: sprite_y,
                     x: sprite_x,
                     tile: tile_id,
                     flags,
                 });
+                // Selection is in OAM order, before X-priority sorting.
+                // Even an object hidden horizontally consumes a scanline slot.
+                if sprites_on_line.len() == 10 { break; }
             }
         }
 
-        // Sort sprites by X position (priority)
+        // Stable sort: on DMG lower X wins, then lower OAM index on a tie.
         sprites_on_line.sort_by_key(|s| s.x);
-
-        // Render sprites (max 10 per scanline)
-        for sprite in sprites_on_line.iter().take(10) {
-            self.render_sprite(sprite, scanline, sprite_height);
+        let mut occupied = [false; LCD_WIDTH];
+        for sprite in &sprites_on_line {
+            self.render_sprite(sprite, scanline, sprite_height, &mut occupied);
         }
     }
 
-    fn render_sprite(&mut self, sprite: &Sprite, scanline: usize, sprite_height: u8) {
-        let sprite_y = sprite.y.wrapping_sub(16);
-        let sprite_x = sprite.x.wrapping_sub(8);
-        
-        if sprite_x >= LCD_WIDTH as u8 {
-            return;
-        }
-
+    fn render_sprite(&mut self, sprite: &Sprite, scanline: usize, sprite_height: u8, occupied: &mut [bool; LCD_WIDTH]) {
+        let sprite_y = i16::from(sprite.y) - 16;
+        let sprite_x = i16::from(sprite.x) - 8;
+        let row = (scanline as i16 - sprite_y) as u8;
         let line_in_sprite = if sprite.y_flip() {
-            sprite_height - 1 - ((scanline as u8).wrapping_sub(sprite_y))
+            sprite_height - 1 - row
         } else {
-            (scanline as u8).wrapping_sub(sprite_y)
+            row
         };
 
         let tile_id = if sprite_height == 16 {
@@ -447,11 +446,11 @@ impl PPU {
             tile_id
         };
 
-        for pixel_x in 0..8 {
-            let screen_x = sprite_x.wrapping_add(pixel_x);
-            if screen_x >= LCD_WIDTH as u8 {
-                break;
-            }
+        for pixel_x in 0..8u8 {
+            let screen_x = sprite_x + i16::from(pixel_x);
+            if !(0..LCD_WIDTH as i16).contains(&screen_x) { continue; }
+            let screen_x = screen_x as usize;
+            if occupied[screen_x] { continue; }
 
             let tile_x = if sprite.x_flip() {
                 7 - pixel_x
@@ -459,13 +458,15 @@ impl PPU {
                 pixel_x
             } as usize;
 
-            let color = self.get_tile_pixel(tile_id, tile_x, tile_y);
+            // OBJ tiles always use unsigned addressing at 8000, independent
+            // of LCDC bit 4 (which applies only to BG and window tiles).
+            let color = self.get_tile_pixel_at(usize::from(tile_id) * 16, tile_x, tile_y);
             if color == 0 {
-                continue; // Transparent pixel
+                continue; // Transparent pixel does not claim OBJ priority.
             }
-
-            // Check sprite priority
-            if sprite.priority() && self.bg_priority[screen_x as usize] {
+            // Resolve OBJ-vs-OBJ priority before testing OBJ-vs-BG priority.
+            occupied[screen_x] = true;
+            if sprite.priority() && self.bg_priority[screen_x] {
                 continue; // Background has priority
             }
 
@@ -474,7 +475,7 @@ impl PPU {
             let final_color = palette.get_color(color);
 
             // Set pixel in framebuffer
-            self.framebuffer[scanline * LCD_WIDTH + screen_x as usize] = final_color;
+            self.framebuffer[scanline * LCD_WIDTH + screen_x] = final_color;
         }
     }
 
@@ -491,6 +492,10 @@ impl PPU {
             signed_addr as usize
         };
 
+        self.get_tile_pixel_at(tile_addr, x, y)
+    }
+
+    fn get_tile_pixel_at(&self, tile_addr: usize, x: usize, y: usize) -> u8 {
         // Bounds checking for VRAM access
         if tile_addr + 15 >= VRAM_SIZE {
             return 0; // Return transparent for out-of-bounds

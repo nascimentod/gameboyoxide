@@ -1,3 +1,6 @@
+pub mod apu;
+pub mod audio;
+pub mod battery_save;
 pub mod cartridge;
 pub mod cpu;
 pub mod gameboy;

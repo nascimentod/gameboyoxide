@@ -65,6 +65,12 @@ impl Cartridge {
         }
     }
 
+    /// Battery-backed cartridge types supported by the current MBC1/MBC3
+    /// implementation. RTC-only cartridges have no RAM image to persist.
+    pub fn has_battery(&self) -> bool {
+        matches!(self.mbc_type, 0x03 | 0x0f | 0x10 | 0x13)
+    }
+
     pub fn read_rom(&self, address: u16) -> u8 {
         match address {
             0x0000..=0x3FFF => {
@@ -189,32 +195,12 @@ impl Cartridge {
     }
     
     fn update_mbc1_rom_bank(&mut self) {
-        // Calculate the actual ROM bank for MBC1
-        let mut bank = self.mbc1_rom_bank_low as usize;
-        
-        // In ROM banking mode, use high bits for extended ROM banking
-        if !self.mbc1_banking_mode {
-            bank |= (self.mbc1_rom_bank_high as usize) << 5;
-        }
-        
-        // Apply ROM bank mask
-        bank &= self.rom_bank_mask;
-        
-        // Bank 0 cannot be selected for 0x4000-0x7FFF range
-        if bank == 0 {
-            bank = 1;
-        }
-        
-        self.current_rom_bank = bank;
-        
-        // Debug output for bank switching
-        if self.mbc_type >= 0x01 && self.mbc_type <= 0x03 {
-            println!("MBC1: ROM bank switched to {}, Mode: {}, Low: {}, High: {}", 
-                bank, 
-                if self.mbc1_banking_mode { "RAM" } else { "ROM" },
-                self.mbc1_rom_bank_low,
-                self.mbc1_rom_bank_high
-            );
-        }
+        // MBC1 substitutes 1 only when the five-bit register is zero.
+        // Missing ROM address lines are masked *after* that substitution:
+        // on a 4-bank cartridge, selecting 4 therefore maps bank 0, not 1.
+        // The upper register affects the switchable window in both modes.
+        let low = if self.mbc1_rom_bank_low == 0 { 1 } else { self.mbc1_rom_bank_low };
+        let bank = ((self.mbc1_rom_bank_high as usize) << 5) | low as usize;
+        self.current_rom_bank = bank & self.rom_bank_mask;
     }
 }
